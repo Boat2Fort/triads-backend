@@ -103,10 +103,10 @@ describe('TriadsService', () => {
 					id: 7,
 					difficulty: Difficulty.HARD,
 					triads: [
-						{ position: 1, id: 71, keyword: 'apple', cues: ['pie'], fullPhrases: ['apple pie'] },
-						{ position: 2, id: 72, keyword: 'tree', cues: ['oak'], fullPhrases: ['oak tree'] },
-						{ position: 3, id: 73, keyword: 'juice', cues: ['orange'], fullPhrases: ['orange juice'] },
-						{ position: 4, id: 74, keyword: 'core', cues: ['fruit'], fullPhrases: ['apple core'] },
+						{ position: 1, isFinal: false, id: 71, keyword: 'apple', cues: ['pie'], fullPhrases: ['apple pie'] },
+						{ position: 2, isFinal: false, id: 72, keyword: 'tree', cues: ['oak'], fullPhrases: ['oak tree'] },
+						{ position: 3, isFinal: false, id: 73, keyword: 'juice', cues: ['orange'], fullPhrases: ['orange juice'] },
+						{ position: 4, isFinal: true, id: 74, keyword: 'core', cues: ['fruit'], fullPhrases: ['apple core'] },
 					],
 				},
 			])
@@ -128,6 +128,18 @@ describe('TriadsService', () => {
 			prismaService.triadGroup.findMany.mockResolvedValue([])
 
 			await expect(service.getPublicTriadGroups()).resolves.toEqual([])
+		})
+	})
+
+	describe('getPublicTriadGroupsPage', () => {
+		it('returns a deterministic page without changing the full-export query', async () => {
+			jest.spyOn(service, 'getPublicTriadGroups').mockResolvedValue([
+				{ id: 9, difficulty: Difficulty.EASY, triads: [] },
+				{ id: 3, difficulty: Difficulty.HARD, triads: [] },
+				{ id: 6, difficulty: Difficulty.MEDIUM, triads: [] },
+			])
+
+			await expect(service.getPublicTriadGroupsPage(1, 1)).resolves.toEqual([{ id: 6, difficulty: Difficulty.MEDIUM, triads: [] }])
 		})
 	})
 

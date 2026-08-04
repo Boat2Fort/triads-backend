@@ -274,12 +274,18 @@ export class TriadsService {
 			id: group.id,
 			difficulty: group.difficulty,
 			triads: [
-				{ position: 1, ...group.Triad1 },
-				{ position: 2, ...group.Triad2 },
-				{ position: 3, ...group.Triad3 },
-				{ position: 4, ...group.Triad4 },
+				{ position: 1, isFinal: false, ...group.Triad1 },
+				{ position: 2, isFinal: false, ...group.Triad2 },
+				{ position: 3, isFinal: false, ...group.Triad3 },
+				{ position: 4, isFinal: true, ...group.Triad4 },
 			],
 		}))
+	}
+
+	async getPublicTriadGroupsPage(offset: number, limit: number) {
+		const triadGroups = await this.getPublicTriadGroups()
+
+		return [...triadGroups].sort((firstGroup, secondGroup) => firstGroup.id - secondGroup.id).slice(offset, offset + limit)
 	}
 
 	async getTriadGroups(offset: number, limit: number, search?: string, difficulty?: Difficulty) {
