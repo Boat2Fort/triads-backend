@@ -3,6 +3,18 @@ import { Difficulty } from '@prisma/client'
 import * as XLSX from 'xlsx'
 
 import { PrismaService } from '../prisma/prisma.service'
+import { buildFourthTriadReceipt, formatFourthTriadReceipt } from '../shared/validators/fourth-triad-receipt'
+
+interface ImportTriad {
+	keyword: string
+	fullPhrases: string[]
+	cues: string[]
+}
+
+interface ImportTriadGroup {
+	difficulty: Difficulty
+	triads: [ImportTriad, ImportTriad, ImportTriad, ImportTriad]
+}
 
 @Injectable()
 export class ImportService {
@@ -57,7 +69,7 @@ export class ImportService {
 				hard: 0,
 				total: 0,
 			}
-			const allTriadGroups = []
+			const stagedTriadGroups: ImportTriadGroup[] = []
 
 			// Process each sheet in the workbook
 			for (const sheetName of workbook.SheetNames) {
@@ -83,8 +95,8 @@ export class ImportService {
 					this.logger.warn(`Sheet "${sheetName}" contains ${data.length} rows, processing only first ${maxRows} rows`)
 				}
 
-				const triadGroups: any[] = []
-				let currentTriadIds: number[] = []
+				let importedGroupCount = 0
+				let currentTriads: ImportTriad[] = []
 				const rowsToProcess = Math.min(data.length, maxRows)
 
 				// Process each row in the current sheet
@@ -100,39 +112,32 @@ export class ImportService {
 					const phrase2 = row.C ? row.C.toString().trim().toUpperCase() : ''
 					const phrase3 = row.D ? row.D.toString().trim().toUpperCase() : ''
 
-					// Create fullPhrases array
+					// Build a complete triad before any database write.
 					const fullPhrases = [phrase1, phrase2, phrase3].filter(Boolean)
-					// Create cues array (phrases with keyword removed)
-					const cues = fullPhrases.map((phrase) => {
-						return phrase.replace(keyword, '').trim()
+					if (fullPhrases.length !== 3) {
+						throw new Error(`Sheet "${sheetName}" row ${i + 1} must contain exactly three full phrases`)
+					}
+					if (!fullPhrases.every((phrase) => phrase.includes(keyword))) {
+						throw new Error(`Sheet "${sheetName}" row ${i + 1} has a full phrase that does not contain keyword "${keyword}"`)
+					}
+
+					currentTriads.push({
+						keyword,
+						fullPhrases,
+						cues: fullPhrases.map((phrase) => phrase.replace(keyword, '').trim()),
 					})
 
-					// Create triad in database
-					const triad = await this.prismaService.triad.create({
-						data: {
-							keyword,
-							fullPhrases,
-							cues,
-						},
-					})
+					// Every fourth row is the final triad. Prove its one-to-one links before writes.
+					if (currentTriads.length === 4) {
+						const [triad1, triad2, triad3, triad4] = currentTriads as ImportTriadGroup['triads']
+						const receipt = buildFourthTriadReceipt([triad1.keyword, triad2.keyword, triad3.keyword], triad4)
+						if (!receipt.valid) {
+							throw new Error(`Sheet "${sheetName}" rows ${i - 2}-${i + 1} have an invalid Triad 4 receipt: ${formatFourthTriadReceipt(receipt)}`)
+						}
 
-					// Add triad ID to current group
-					currentTriadIds.push(triad.id)
-
-					// If we have 4 triads, create a triad group with the appropriate difficulty
-					if (currentTriadIds.length === 4) {
-						const triadGroup = await this.prismaService.triadGroup.create({
-							data: {
-								triad1Id: currentTriadIds[0],
-								triad2Id: currentTriadIds[1],
-								triad3Id: currentTriadIds[2],
-								triad4Id: currentTriadIds[3],
-								difficulty,
-							},
-						})
-
-						triadGroups.push(triadGroup)
-						allTriadGroups.push(triadGroup)
+						triad4.cues = receipt.matches.map((match) => match.keyword)
+						stagedTriadGroups.push({ difficulty, triads: [triad1, triad2, triad3, triad4] })
+						importedGroupCount++
 
 						// Update statistics
 						stats.total++
@@ -144,17 +149,44 @@ export class ImportService {
 							stats.hard++
 						}
 
-						currentTriadIds = [] // Reset for next group
+						currentTriads = [] // Reset for next group
 					}
 				}
 
-				this.logger.log(`Processed sheet "${sheetName}" (${difficulty}): ${triadGroups.length} triad groups`)
+				if (currentTriads.length > 0) {
+					throw new Error(`Sheet "${sheetName}" ends with an incomplete triad group`)
+				}
+
+				this.logger.log(`Validated sheet "${sheetName}" (${difficulty}): ${importedGroupCount} triad groups`)
 			}
 
 			// Validate that at least one valid sheet was processed
 			if (stats.total === 0) {
 				throw new Error('No valid sheets found. Expected sheets named Easy, Medium, or Hard (case-insensitive)')
 			}
+
+			await this.prismaService.$transaction(async (transaction) => {
+				for (const { difficulty, triads } of stagedTriadGroups) {
+					const createdTriads: { id: number }[] = []
+					for (const triad of triads) {
+						createdTriads.push(
+							await transaction.triad.create({
+								data: triad,
+							}),
+						)
+					}
+
+					await transaction.triadGroup.create({
+						data: {
+							triad1Id: createdTriads[0].id,
+							triad2Id: createdTriads[1].id,
+							triad3Id: createdTriads[2].id,
+							triad4Id: createdTriads[3].id,
+							difficulty,
+						},
+					})
+				}
+			})
 
 			// Explicitly clear workbook from memory
 			workbook = null

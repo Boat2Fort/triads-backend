@@ -1,5 +1,7 @@
 import { ValidationArguments, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator'
 
+import { buildFourthTriadReceipt, formatFourthTriadReceipt } from './fourth-triad-receipt'
+
 interface TriadInputDto {
 	keyword: string
 	fullPhrases: string[]
@@ -26,55 +28,15 @@ export class IsFourthTriadCuesValidConstraint implements ValidatorConstraintInte
 			return false
 		}
 
-		// Get keywords from first three triads
-		const keyword1 = triad1.keyword
-		const keyword2 = triad2.keyword
-		const keyword3 = triad3.keyword
-
-		// Get fullPhrases from fourth triad
-		const fullPhrases4 = triad4.fullPhrases
-
-		if (!keyword1 || !keyword2 || !keyword3 || !fullPhrases4 || !Array.isArray(fullPhrases4) || fullPhrases4.length !== 3) {
-			return false
-		}
-
-		// Extract cues from fullPhrases by removing the keyword from each phrase (case-insensitive)
-		// Example: keyword="STOCK", fullPhrases=["OVERSTOCK","STOCK EXCHANGE","WOODSTOCK"]
-		// Result: cues=["OVER","EXCHANGE","WOOD"]
-		// Check if keywords of first three triads match the cues extracted from fullPhrases of the fourth triad
-		// Convert to uppercase for case-insensitive comparison
-		const expectedCues = [keyword1.toUpperCase(), keyword2.toUpperCase(), keyword3.toUpperCase()].sort()
-		const keyword4 = triad4.keyword
-		const keyword4Upper = keyword4.toUpperCase()
-		const actualCues = fullPhrases4
-			.map((phrase: string) => {
-				const phraseUpper = phrase.toUpperCase()
-				let cue = phrase
-				// Check startsWith before endsWith so "EVEN STEVEN" yields "STEVEN" (not "EVEN ST")
-				if (phraseUpper.startsWith(keyword4Upper + ' ')) {
-					cue = phrase.slice(keyword4.length + 1).trim()
-				} else if (phraseUpper.startsWith(keyword4Upper)) {
-					cue = phrase.slice(keyword4.length).trim()
-				} else if (phraseUpper.endsWith(keyword4Upper)) {
-					const beforeKeyword = phrase.slice(0, -keyword4.length)
-					const lastChar = beforeKeyword.slice(-1)
-					if (lastChar === '-' || lastChar === ' ' || lastChar === '_') {
-						cue = beforeKeyword.slice(0, -1).trim()
-					} else {
-						cue = beforeKeyword.trim()
-					}
-				} else if (phraseUpper.includes(keyword4Upper)) {
-					const index = phraseUpper.indexOf(keyword4Upper)
-					cue = (phrase.slice(0, index) + phrase.slice(index + keyword4.length)).trim()
-				}
-				return cue.toUpperCase()
-			})
-			.sort()
-
-		return expectedCues.every((expectedCue) => actualCues.some((actualCue) => actualCue.includes(expectedCue)))
+		return buildFourthTriadReceipt([triad1.keyword, triad2.keyword, triad3.keyword], triad4).valid
 	}
 
-	defaultMessage(): string {
-		return 'Keywords of triad1, triad2, and triad3 must match the cues extracted from fullPhrases of triad4'
+	defaultMessage(args: ValidationArguments): string {
+		const object = args.object as TriadGroupInputObject
+		const receipt = buildFourthTriadReceipt([object.triad1?.keyword ?? '', object.triad2?.keyword ?? '', object.triad3?.keyword ?? ''], {
+			keyword: object.triad4?.keyword ?? '',
+			fullPhrases: object.triad4?.fullPhrases ?? [],
+		})
+		return `Triad 4 receipt failed: ${formatFourthTriadReceipt(receipt)}`
 	}
 }

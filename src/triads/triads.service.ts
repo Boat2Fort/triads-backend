@@ -3,6 +3,7 @@ import { Difficulty, Prisma } from '@prisma/client'
 import { isEmpty, xor } from 'lodash'
 
 import { PrismaService } from '../prisma/prisma.service'
+import { buildFourthTriadReceipt, formatFourthTriadReceipt } from '../shared/validators/fourth-triad-receipt'
 import { CreateTriadGroupDto } from './dto/create-triad-group.dto'
 import { DifficultyFilter, GetCuesDto } from './dto/get-cues.dto'
 import { GetFourthTriadDto } from './dto/get-fourth-triad.dto'
@@ -498,8 +499,8 @@ export class TriadsService {
 		this.validateKeywordSubstring(createDto.triad3)
 		this.validateKeywordSubstring(createDto.triad4)
 
-		// Validate fourth triad cues
-		this.validateFourthTriadCues(createDto.triad1, createDto.triad2, createDto.triad3, createDto.triad4)
+		// Validate fourth triad cues and retain the proof for the stored final cues.
+		const triad4Receipt = this.validateFourthTriadCues(createDto.triad1, createDto.triad2, createDto.triad3, createDto.triad4)
 
 		// Create all 4 triads
 		const triad1 = await this.prismaService.triad.create({
@@ -529,7 +530,7 @@ export class TriadsService {
 		const triad4 = await this.prismaService.triad.create({
 			data: {
 				keyword: createDto.triad4.keyword,
-				cues: this.extractCues(createDto.triad4.fullPhrases, createDto.triad4.keyword),
+				cues: triad4Receipt.matches.map((match) => match.keyword),
 				fullPhrases: createDto.triad4.fullPhrases,
 			},
 		})
@@ -602,8 +603,8 @@ export class TriadsService {
 		this.validateKeywordSubstring(updateDto.triad3)
 		this.validateKeywordSubstring(updateDto.triad4)
 
-		// Validate fourth triad cues
-		this.validateFourthTriadCues(updateDto.triad1, updateDto.triad2, updateDto.triad3, updateDto.triad4)
+		// Validate fourth triad cues and retain the proof for the stored final cues.
+		const triad4Receipt = this.validateFourthTriadCues(updateDto.triad1, updateDto.triad2, updateDto.triad3, updateDto.triad4)
 
 		// Find the triad group
 		const triadGroup = await this.prismaService.triadGroup.findUnique({
@@ -652,7 +653,7 @@ export class TriadsService {
 			where: { id: triadGroup.triad4Id },
 			data: {
 				keyword: updateDto.triad4.keyword,
-				cues: this.extractCues(updateDto.triad4.fullPhrases, updateDto.triad4.keyword),
+				cues: triad4Receipt.matches.map((match) => match.keyword),
 				fullPhrases: updateDto.triad4.fullPhrases,
 			},
 		})
@@ -738,28 +739,14 @@ export class TriadsService {
 		}
 	}
 
-	// Validation helper: Check if keywords of first 3 triads match cues extracted from fullPhrases of 4th triad (case-insensitive)
-	private validateFourthTriadCues(triad1: TriadInputDto, triad2: TriadInputDto, triad3: TriadInputDto, triad4: TriadInputDto): void {
-		// Convert to uppercase for case-insensitive comparison
-		const expectedCues = [triad1.keyword.toUpperCase(), triad2.keyword.toUpperCase(), triad3.keyword.toUpperCase()].sort()
-
-		// Extract cues from fullPhrases by removing the keyword from each phrase (case-insensitive)
-		const actualCues = this.extractCues(triad4.fullPhrases, triad4.keyword).sort()
-
-		if (expectedCues.length !== actualCues.length) {
-			throw new BadRequestException('Keywords of triad1, triad2, and triad3 must match the cues extracted from fullPhrases of triad4')
+	// Validation helper: prove each final phrase resolves to one distinct earlier keyword.
+	private validateFourthTriadCues(triad1: TriadInputDto, triad2: TriadInputDto, triad3: TriadInputDto, triad4: TriadInputDto) {
+		const receipt = buildFourthTriadReceipt([triad1.keyword, triad2.keyword, triad3.keyword], triad4)
+		if (!receipt.valid) {
+			throw new BadRequestException(`Triad 4 receipt failed: ${formatFourthTriadReceipt(receipt)}`)
 		}
 
-		let mismatch = false
-
-		for (const expectedCue of expectedCues) {
-			mismatch = !actualCues.some((actualCue) => actualCue.includes(expectedCue))
-		}
-		if (mismatch) {
-			throw new BadRequestException(
-				`Keywords of triad1 (${triad1.keyword}), triad2 (${triad2.keyword}), and triad3 (${triad3.keyword}) must match the cues extracted from fullPhrases of triad4 (${triad4.fullPhrases.join(', ')})`,
-			)
-		}
+		return receipt
 	}
 
 	// Helper function to extract cues from fullPhrases by removing the keyword (case-insensitive)
