@@ -4,6 +4,7 @@ import { isEmpty, xor } from 'lodash'
 
 import { PrismaService } from '../prisma/prisma.service'
 import { buildFourthTriadReceipt, formatFourthTriadReceipt } from '../shared/validators/fourth-triad-receipt'
+import { extractCuesFromPhrases } from './cue-extraction'
 import { CreateTriadGroupDto } from './dto/create-triad-group.dto'
 import { DifficultyFilter, GetCuesDto } from './dto/get-cues.dto'
 import { GetFourthTriadDto } from './dto/get-fourth-triad.dto'
@@ -11,6 +12,19 @@ import { GetHintDto } from './dto/get-hint.dto'
 import { TriadInputDto } from './dto/triad-input.dto'
 import { UpdateTriadGroupDto } from './dto/update-triad-group.dto'
 import { TriadsDailyService } from './triads-daily.service'
+
+type TriadCueQueryResult = {
+	id: number
+	triad1: string[]
+	triad2: string[]
+	triad3: string[]
+	triad1_keyword?: string
+	triad2_keyword?: string
+	triad3_keyword?: string
+	triad1_full_phrases?: string[]
+	triad2_full_phrases?: string[]
+	triad3_full_phrases?: string[]
+}
 
 @Injectable()
 export class TriadsService {
@@ -38,17 +52,23 @@ export class TriadsService {
 
 		// Optimized query using JOINs instead of nested subqueries for better performance
 		// Use parameterized query to prevent SQL injection
-		let triadGroups: { id: number; triad1: string[]; triad2: string[]; triad3: string[] }[]
+		let triadGroups: TriadCueQueryResult[]
 
 		if (shouldFilterByDifficulty) {
 			// Use Prisma.sql for safe parameterization
-			triadGroups = await this.prismaService.$queryRaw<{ id: number; triad1: string[]; triad2: string[]; triad3: string[] }[]>(
+			triadGroups = await this.prismaService.$queryRaw<TriadCueQueryResult[]>(
 				Prisma.sql`
 					SELECT 
 						tg.id,
 						t1.cues as triad1,
+						t1.keyword as triad1_keyword,
+						t1."fullPhrases" as triad1_full_phrases,
 						t2.cues as triad2,
-						t3.cues as triad3
+						t2.keyword as triad2_keyword,
+						t2."fullPhrases" as triad2_full_phrases,
+						t3.cues as triad3,
+						t3.keyword as triad3_keyword,
+						t3."fullPhrases" as triad3_full_phrases
 					FROM "triadGroups" tg
 					INNER JOIN "triads" t1 ON t1.id = tg."triad1Id"
 					INNER JOIN "triads" t2 ON t2.id = tg."triad2Id"
@@ -59,12 +79,18 @@ export class TriadsService {
 				`,
 			)
 		} else {
-			triadGroups = await this.prismaService.$queryRawUnsafe<{ id: number; triad1: string[]; triad2: string[]; triad3: string[] }[]>(`
+			triadGroups = await this.prismaService.$queryRawUnsafe<TriadCueQueryResult[]>(`
 				SELECT 
 					tg.id,
 					t1.cues as triad1,
+					t1.keyword as triad1_keyword,
+					t1."fullPhrases" as triad1_full_phrases,
 					t2.cues as triad2,
-					t3.cues as triad3
+					t2.keyword as triad2_keyword,
+					t2."fullPhrases" as triad2_full_phrases,
+					t3.cues as triad3,
+					t3.keyword as triad3_keyword,
+					t3."fullPhrases" as triad3_full_phrases
 				FROM "triadGroups" tg
 				INNER JOIN "triads" t1 ON t1.id = tg."triad1Id"
 				INNER JOIN "triads" t2 ON t2.id = tg."triad2Id"
@@ -91,24 +117,29 @@ export class TriadsService {
 
 		return {
 			triadGroupId: triadGroup.id,
-			cues: [...triadGroup.triad1, ...triadGroup.triad2, ...triadGroup.triad3].sort(() => Math.random() - 0.5),
+			cues: [
+				...this.getDisplayedCues(triadGroup.triad1, triadGroup.triad1_keyword, triadGroup.triad1_full_phrases),
+				...this.getDisplayedCues(triadGroup.triad2, triadGroup.triad2_keyword, triadGroup.triad2_full_phrases),
+				...this.getDisplayedCues(triadGroup.triad3, triadGroup.triad3_keyword, triadGroup.triad3_full_phrases),
+			].sort(() => Math.random() - 0.5),
 		}
 	}
 
 	async getMatchedTriad(cues: string[]): Promise<{ id: number; keyword: string; cues: string[]; fullPhrases: string[] } | undefined> {
 		const sampleCue = cues[0]
+		const sampleCueVariants = [...new Set([sampleCue.toUpperCase(), this.normalizeCueForMatch(sampleCue)])]
 
 		// Limit results to prevent loading all triads into memory
 		const triadsContainingSampleCue = await this.prismaService.triad.findMany({
-			where: { cues: { has: sampleCue.toUpperCase() } },
+			where: { cues: { hasSome: sampleCueVariants } },
 			take: 1000, // Reasonable limit to prevent memory issues
 		})
 
 		return triadsContainingSampleCue.find((triad) =>
 			isEmpty(
 				xor(
-					triad.cues.map((cue) => cue.toUpperCase()),
-					cues.map((cue) => cue.toUpperCase()),
+					triad.cues.map((cue) => this.normalizeCueForMatch(cue)),
+					cues.map((cue) => this.normalizeCueForMatch(cue)),
 				),
 			),
 		)
@@ -121,18 +152,25 @@ export class TriadsService {
 	async getHint(getHintDto: GetHintDto) {
 		// Pick a sample cue to work with
 		const sampleCue = getHintDto.cues[Math.floor(Math.random() * getHintDto.cues.length)]
+		const normalizedCues = getHintDto.cues.map((cue) => this.normalizeCueForMatch(cue))
+		const sampleCueVariants = [...new Set([sampleCue.toUpperCase(), this.normalizeCueForMatch(sampleCue)])]
 
 		// Get list of triads containing the sample cue with limit to prevent memory issues
 		const triadsContainingSampleCue = await this.prismaService.triad.findMany({
-			where: { cues: { has: sampleCue.toUpperCase() } },
+			where: { cues: { hasSome: sampleCueVariants } },
 			take: 1000, // Reasonable limit to prevent memory issues
 		})
 
 		// Find a triad which contains the sample cue word and two other cues from the list of cues received
-		const matchedTriad = triadsContainingSampleCue.find((triad) => triad.cues.every((cue) => getHintDto.cues.includes(cue)))
+		const matchedTriad = triadsContainingSampleCue.find((triad) => triad.cues.every((cue) => normalizedCues.includes(this.normalizeCueForMatch(cue))))
+		const hint = matchedTriad
+			? matchedTriad.cues.map(
+					(cue) => getHintDto.cues.find((submittedCue) => this.normalizeCueForMatch(submittedCue) === this.normalizeCueForMatch(cue)) ?? cue,
+				)
+			: null
 
 		return {
-			hint: matchedTriad ? matchedTriad.cues : null,
+			hint,
 			with: getHintDto.with,
 			withValue:
 				getHintDto.with && matchedTriad
@@ -149,15 +187,26 @@ export class TriadsService {
 				id: getFourthTriadDto.triadGroupId,
 			},
 			select: {
+				Triad1: { select: { keyword: true } },
+				Triad2: { select: { keyword: true } },
+				Triad3: { select: { keyword: true } },
 				Triad4: {
 					select: {
+						keyword: true,
 						cues: true,
+						fullPhrases: true,
 					},
 				},
 			},
 		})
 
-		return triadGroup?.Triad4?.cues
+		if (!triadGroup?.Triad4) {
+			return undefined
+		}
+
+		const receipt = buildFourthTriadReceipt([triadGroup.Triad1.keyword, triadGroup.Triad2.keyword, triadGroup.Triad3.keyword], triadGroup.Triad4)
+
+		return receipt.valid ? receipt.matches.map((match) => match.residual.trim().toUpperCase()) : triadGroup.Triad4.cues
 	}
 
 	async getFourthTriadSolution(getFourthTriadDto: GetFourthTriadDto) {
@@ -753,30 +802,14 @@ export class TriadsService {
 	// Example: keyword="STOCK", fullPhrases=["OVERSTOCK","STOCK EXCHANGE","WOODSTOCK"]
 	// Result: cues=["OVER","EXCHANGE","WOOD"]
 	private extractCues(fullPhrases: string[], keyword: string): string[] {
-		const keywordUpper = keyword.toUpperCase()
-		return fullPhrases.map((phrase) => {
-			const phraseUpper = phrase.toUpperCase()
-			let cue = phrase
-			// Check startsWith before endsWith so "EVEN STEVEN" yields "STEVEN" (not "EVEN ST")
-			if (phraseUpper.startsWith(keywordUpper + ' ')) {
-				cue = phrase.slice(keyword.length + 1).trim()
-			} else if (phraseUpper.startsWith(keywordUpper)) {
-				cue = phrase.slice(keyword.length).trim()
-			} else if (phraseUpper.endsWith(keywordUpper)) {
-				const beforeKeyword = phrase.slice(0, -keyword.length)
-				const lastChar = beforeKeyword.slice(-1)
-				if (lastChar === '-' || lastChar === ' ' || lastChar === '_') {
-					cue = beforeKeyword.slice(0, -1).trim()
-				} else {
-					cue = beforeKeyword.trim()
-				}
-			} else if (phraseUpper.includes(keywordUpper)) {
-				// Keyword is in the middle, replace it (case-insensitive)
-				// Find the position and remove the actual keyword from original phrase
-				const index = phraseUpper.indexOf(keywordUpper)
-				cue = (phrase.slice(0, index) + phrase.slice(index + keyword.length)).trim()
-			}
-			return cue.toUpperCase()
-		})
+		return extractCuesFromPhrases(fullPhrases, keyword)
+	}
+
+	private getDisplayedCues(storedCues: string[], keyword?: string, fullPhrases?: string[]): string[] {
+		return keyword && fullPhrases?.length ? extractCuesFromPhrases(fullPhrases, keyword) : storedCues
+	}
+
+	private normalizeCueForMatch(cue: string): string {
+		return cue.replace(/^[\s_-]+|[\s_-]+$/g, '').toUpperCase()
 	}
 }

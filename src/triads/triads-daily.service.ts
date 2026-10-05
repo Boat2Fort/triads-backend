@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { DailyAttemptStatus, Prisma } from '@prisma/client'
 
 import { PrismaService } from '../prisma/prisma.service'
+import { extractCuesFromPhrases } from './cue-extraction'
 import { buildClassicExtraUsageInfo, ClassicExtraUsageInfo } from './triads-daily.types'
 import { easternYmdToDbDate, getEasternYmd, getNextEasternMidnightIso } from './triads-daily-timezone'
 
@@ -34,9 +35,9 @@ export class TriadsDailyService {
 			include: {
 				TriadGroup: {
 					include: {
-						Triad1: { select: { cues: true } },
-						Triad2: { select: { cues: true } },
-						Triad3: { select: { cues: true } },
+						Triad1: { select: { keyword: true, fullPhrases: true } },
+						Triad2: { select: { keyword: true, fullPhrases: true } },
+						Triad3: { select: { keyword: true, fullPhrases: true } },
 					},
 				},
 			},
@@ -98,14 +99,18 @@ export class TriadsDailyService {
 			}
 		}
 
-		const t1 = group.Triad1?.cues
-		const t2 = group.Triad2?.cues
-		const t3 = group.Triad3?.cues
-		if (!t1?.length || !t2?.length || !t3?.length) {
+		const triad1 = group.Triad1
+		const triad2 = group.Triad2
+		const triad3 = group.Triad3
+		if (!triad1?.fullPhrases.length || !triad2?.fullPhrases.length || !triad3?.fullPhrases.length) {
 			throw new BadRequestException('Today’s puzzle data is invalid.')
 		}
 
-		const cues = this.shuffleInitialCues(t1, t2, t3)
+		const cues = this.shuffleInitialCues(
+			extractCuesFromPhrases(triad1.fullPhrases, triad1.keyword),
+			extractCuesFromPhrases(triad2.fullPhrases, triad2.keyword),
+			extractCuesFromPhrases(triad3.fullPhrases, triad3.keyword),
+		)
 
 		await this.prismaService.dailyTriadAttempt.create({
 			data: {

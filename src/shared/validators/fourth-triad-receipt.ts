@@ -169,7 +169,7 @@ export function buildFourthTriadReceipt(earlyKeywords: string[], finalTriad: Fin
 
 	const matches = matchings[0].map(({ candidate }) => ({
 		...candidate,
-		display: `${candidate.phrase} - ${finalTriad.keyword} = ${candidate.canonicalResidual} -> Triad ${candidate.triadIndex}`,
+		display: `${candidate.phrase} - ${finalTriad.keyword} = ${candidate.residual.trim()} -> Triad ${candidate.triadIndex}`,
 	}))
 
 	return {
