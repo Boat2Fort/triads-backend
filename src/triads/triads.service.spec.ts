@@ -11,7 +11,10 @@ describe('TriadsService', () => {
 	let prismaService: {
 		$queryRaw: jest.Mock
 		$queryRawUnsafe: jest.Mock
+		triad: { findMany: jest.Mock }
 		triadGroup: {
+			findUnique: jest.Mock
+			findFirst: jest.Mock
 			findMany: jest.Mock
 			groupBy: jest.Mock
 		}
@@ -21,7 +24,10 @@ describe('TriadsService', () => {
 		prismaService = {
 			$queryRaw: jest.fn(),
 			$queryRawUnsafe: jest.fn(),
+			triad: { findMany: jest.fn() },
 			triadGroup: {
+				findUnique: jest.fn(),
+				findFirst: jest.fn(),
 				findMany: jest.fn(),
 				groupBy: jest.fn(),
 			},
@@ -82,6 +88,134 @@ describe('TriadsService', () => {
 
 		it('rejects a different answer', () => {
 			expect(service.checkAnswer('cat', triad)).toBe(false)
+		})
+
+		it('returns displayed trailing-hyphen cues for legacy stored cues', () => {
+			const buttonTriad = {
+				id: 2,
+				keyword: 'BUTTON',
+				cues: ['PUSH', 'CAMPAIGN', 'PANIC'],
+				fullPhrases: ['PUSH-BUTTON', 'CAMPAIGN BUTTON', 'PANIC BUTTON'],
+			}
+
+			expect(service.checkAnswer('button', buttonTriad)).toEqual({ ...buttonTriad, cues: ['PUSH-', 'CAMPAIGN', 'PANIC'] })
+			expect(buttonTriad.cues).toEqual(['PUSH', 'CAMPAIGN', 'PANIC'])
+		})
+
+		it('preserves displayed leading-hyphen cues when the keyword precedes the cue', () => {
+			const triad = { id: 3, keyword: 'WELL', cues: ['BEING', 'KNOWN', 'WISHER'], fullPhrases: ['WELL-BEING', 'WELL-KNOWN', 'WELL-WISHER'] }
+
+			expect(service.checkAnswer('well', triad)).toEqual({ ...triad, cues: ['-BEING', '-KNOWN', '-WISHER'] })
+		})
+	})
+
+	describe('gameplay cue identity and matching', () => {
+		const button = { id: 1, keyword: 'BUTTON', cues: ['PUSH', 'CAMPAIGN', 'PANIC'], fullPhrases: ['PUSH-BUTTON', 'CAMPAIGN BUTTON', 'PANIC BUTTON'] }
+		const pigeon = { id: 2, keyword: 'PIGEON', cues: ['CARRIER', 'CLAY', 'STOOL'], fullPhrases: ['CARRIER PIGEON', 'CLAY PIGEON', 'STOOL PIGEON'] }
+		const port = { id: 3, keyword: 'PORT', cues: ['AUTHORITY', 'AIR', 'WINE'], fullPhrases: ['PORT AUTHORITY', 'AIRPORT', 'PORT WINE'] }
+		const final = { id: 4, keyword: 'HOLE', cues: ['BUTTON', 'PIGEON', 'PORT'], fullPhrases: ['BUTTONHOLE', 'PIGEONHOLE', 'PORTHOLE'] }
+		const group = { Triad1: button, Triad2: pigeon, Triad3: port, Triad4: final }
+
+		beforeEach(() => {
+			prismaService.triadGroup.findUnique.mockResolvedValue(group)
+			prismaService.triad.findMany.mockResolvedValue([button, pigeon, port, final])
+		})
+
+		it.each([
+			['PUSH-', 'CAMPAIGN', 'PANIC'],
+			['CAMPAIGN', 'PANIC', 'PUSH-'],
+			['PANIC', 'PUSH-', 'CAMPAIGN'],
+		])('matches any selected cue order (%s first)', async (...cues) => {
+			const result = await service.getMatchedTriad(cues, { triadGroupId: 7 })
+			expect(result?.id).toBe(button.id)
+			expect(result?.cues).toEqual(['PUSH-', 'CAMPAIGN', 'PANIC'])
+		})
+
+		it('returns false for an unmatched answer instead of throwing', () => {
+			expect(service.checkAnswer('BUTTON', undefined)).toBe(false)
+		})
+
+		it('returns the submitted spelling for Daily sessions loaded before hyphens were preserved', async () => {
+			const cues = ['PANIC', 'PUSH', 'CAMPAIGN']
+			const matched = await service.getMatchedTriad(cues, { triadGroupId: 7 })
+			expect(service.checkAnswer('BUTTON', matched, cues)).toEqual({ ...button, cues })
+		})
+
+		it('does not match duplicate selections by treating them as sets', async () => {
+			expect(await service.getMatchedTriad(['PUSH-', 'PUSH-', 'PANIC'], { triadGroupId: 7 })).toBeUndefined()
+			prismaService.triad.findMany.mockResolvedValue([{ ...button, cues: ['PUSH', 'PANIC', 'PANIC'], fullPhrases: [] }])
+			expect(await service.getMatchedTriad(['PUSH-', 'PUSH-', 'PANIC'])).toBeUndefined()
+		})
+
+		it('restricts hints and answers to the active group and round', async () => {
+			expect(await service.getMatchedTriad(final.cues, { triadGroupId: 7 })).toBeUndefined()
+			expect(await service.getMatchedTriad(['PUSH-', 'PANIC', 'CAMPAIGN'], { triadGroupId: 7, triadsStep: 'FINAL' })).toBeUndefined()
+			expect((await service.getHint({ cues: ['BUTTON', 'PIGEON', 'PORT'], triadGroupId: 7 })).hint).toBeNull()
+			expect(prismaService.triad.findMany).not.toHaveBeenCalled()
+		})
+
+		it('uses the final receipt for repeated-keyword bonus phrases', async () => {
+			const bonus = { id: 4, keyword: 'AN', cues: ['AAN', 'GRADE', 'TEAM'], fullPhrases: ['ANAAN', 'AN-GRADE', 'TEAM-AN'] }
+			const bonusGroup = {
+				Triad1: { ...button, keyword: 'ANA' },
+				Triad2: { ...pigeon, keyword: 'GRADE' },
+				Triad3: { ...port, keyword: 'TEAM' },
+				Triad4: bonus,
+			}
+			prismaService.triadGroup.findUnique.mockResolvedValue(bonusGroup)
+			prismaService.triadGroup.findFirst.mockResolvedValue(bonusGroup)
+			const cues = await service.getFourthTriadCues({ triadGroupId: 7 })
+			const matched = await service.getMatchedTriad(cues, { triadGroupId: 7, triadsStep: 'FINAL' })
+			expect(cues).toEqual(['ANA', '-GRADE', 'TEAM-'])
+			expect(matched?.id).toBe(4)
+			expect((await service.getHint({ cues, triadGroupId: 7, triadsStep: 'FINAL', with: 'FIRST_LETTER' })).withValue).toBe('A')
+		})
+
+		it('returns no match for a missing group without falling back to another puzzle', async () => {
+			prismaService.triadGroup.findUnique.mockResolvedValue(null)
+			expect(await service.getMatchedTriad(button.cues, { triadGroupId: 999 })).toBeUndefined()
+			expect((await service.getHint({ cues: button.cues, triadGroupId: 999 })).hint).toBeNull()
+		})
+
+		it('supports legacy clients in both directions of hyphen spelling', async () => {
+			prismaService.triad.findMany.mockResolvedValue([{ ...button, cues: ['PUSH-', 'CAMPAIGN', 'PANIC'] }])
+			expect((await service.getMatchedTriad(['PUSH', 'CAMPAIGN', 'PANIC']))?.id).toBe(button.id)
+			const calls = prismaService.triad.findMany.mock.calls as [{ where: { AND: { cues: { hasSome: string[] } }[] } }][]
+			const query = calls[0][0]
+			expect(query.where.AND[0].cues.hasSome).toContain('PUSH-')
+			expect(query.where.AND[0].cues.hasSome).toContain('PUSH')
+		})
+
+		it('finds a hint from all available cues, even when one cue belongs to no triad', async () => {
+			const cues = ['UNMATCHED', 'PUSH-', 'CAMPAIGN', 'PANIC']
+			const result = await service.getHint({ cues, with: 'KEYWORD_LENGTH' })
+			expect(result).toEqual({ hint: ['PUSH-', 'CAMPAIGN', 'PANIC'], with: 'KEYWORD_LENGTH', withValue: 6 })
+			const calls = prismaService.triad.findMany.mock.calls as [{ where: { cues: { hasSome: string[] } } }][]
+			const query = calls[0][0]
+			expect(query.where.cues.hasSome).toEqual(expect.arrayContaining(['UNMATCHED', 'PUSH-', 'PANIC']))
+		})
+
+		it('disambiguates answers when multiple triads share cues', async () => {
+			prismaService.triad.findMany.mockResolvedValue([{ ...button, keyword: 'OTHER', fullPhrases: [] }, button])
+			expect((await service.getMatchedTriad(button.cues, {}, ' button '))?.keyword).toBe('BUTTON')
+		})
+
+		it('does not confuse leading and trailing hyphens', async () => {
+			expect(await service.getMatchedTriad(['-PUSH', 'CAMPAIGN', 'PANIC'], { triadGroupId: 7 })).toBeUndefined()
+			expect((await service.getMatchedTriad(['PUSH', 'CAMPAIGN', 'PANIC'], { triadGroupId: 7 }))?.id).toBe(button.id)
+		})
+
+		it('finds a one-to-one cue mapping when a legacy spelling could match either hyphen direction', async () => {
+			const triad = { ...button, cues: ['PUSH', 'PUSH-', 'PANIC'], fullPhrases: [] }
+			prismaService.triad.findMany.mockResolvedValue([triad])
+			const cues = ['PUSH-', '-PUSH', 'PANIC']
+			expect((await service.getMatchedTriad(cues))?.id).toBe(button.id)
+			expect((await service.getHint({ cues })).hint).toEqual(['-PUSH', 'PUSH-', 'PANIC'])
+		})
+
+		it('does not use one visible cue twice in a hint', async () => {
+			prismaService.triad.findMany.mockResolvedValue([{ ...button, cues: ['PUSH', 'PUSH', 'PANIC'], fullPhrases: [] }])
+			expect((await service.getHint({ cues: ['PUSH-', 'PANIC', 'OTHER'] })).hint).toBeNull()
 		})
 	})
 

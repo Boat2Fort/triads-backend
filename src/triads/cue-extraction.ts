@@ -6,7 +6,7 @@ export function extractCuesFromPhrases(fullPhrases: string[], keyword: string): 
 		let cue = phrase
 
 		// Check startsWith before endsWith so "EVEN STEVEN" yields "STEVEN" (not "EVEN ST").
-		if (phraseUpper.startsWith(keywordUpper + ' ')) {
+		if (phraseUpper.startsWith(keywordUpper + ' ') || phraseUpper.startsWith(keywordUpper + '_')) {
 			cue = phrase.slice(keyword.length + 1).trim()
 		} else if (phraseUpper.startsWith(keywordUpper)) {
 			cue = phrase.slice(keyword.length).trim()

@@ -125,6 +125,21 @@ function createPrismaMock(
 				}
 				return { id: row.id, status: row.status, progress: row.progress ?? null }
 			}),
+			updateMany: jest.fn(
+				({
+					where,
+					data,
+				}: {
+					where: { id: number; status: DailyAttemptStatus }
+					data: { progress?: unknown; status?: DailyAttemptStatus; score?: number }
+				}) => {
+					const row = attempts.find((a) => a.id === where.id && a.status === where.status)
+					if (!row) return { count: 0 }
+					if (data.progress !== undefined) row.progress = data.progress
+					if (data.status !== undefined) row.status = data.status
+					return { count: 1 }
+				},
+			),
 			update: jest.fn(({ where, data }: { where: { id: number }; data: { progress?: unknown; status?: DailyAttemptStatus; score?: number } }) => {
 				const row = attempts.find((a) => a.id === where.id)
 				if (!row) return null
@@ -378,6 +393,55 @@ describe('TriadsDailyService (classic extra quota)', () => {
 		const { prismaMock } = createPrismaMock([{ id: 1, puzzleDateYmd: today, triadGroupId: 10 }])
 		const service = await buildService(prismaMock)
 		await expect(service.saveDailyProgress(TEST_ANONYMOUS_ID, { foo: 1 })).rejects.toBeInstanceOf(NotFoundException)
+	})
+
+	it('saves and completes the loaded puzzle after Eastern midnight without modifying today’s attempt', async () => {
+		const yesterday = addDaysYmd(today, -1)
+		const { prismaMock, attempts } = createPrismaMock([], {
+			attempts: [
+				{ id: 1, anonymousId: TEST_ANONYMOUS_ID, puzzleDate: easternYmdToDbDate(yesterday), status: DailyAttemptStatus.IN_PROGRESS },
+				{ id: 2, anonymousId: TEST_ANONYMOUS_ID, puzzleDate: todayDate, status: DailyAttemptStatus.IN_PROGRESS },
+			],
+		})
+		const service = await buildService(prismaMock)
+		const progress = { puzzleDate: yesterday, solvedTriads: ['BUTTON'] }
+		await service.saveDailyProgress(TEST_ANONYMOUS_ID, progress)
+		expect(attempts[0].progress).toEqual(progress)
+		expect(attempts[1].progress).toBeUndefined()
+		const result = await service.completeDaily(TEST_ANONYMOUS_ID, 'won', 15, yesterday)
+		expect(result.puzzleDate).toBe(yesterday)
+		expect(attempts[0].status).toBe(DailyAttemptStatus.WON)
+		expect(attempts[1].status).toBe(DailyAttemptStatus.IN_PROGRESS)
+	})
+
+	it.each(['not-a-date', '2026-02-30', '2999-01-01'])('rejects invalid or future attempt date %s', async (date) => {
+		const { prismaMock } = createPrismaMock([])
+		const service = await buildService(prismaMock)
+		await expect(service.completeDaily(TEST_ANONYMOUS_ID, 'won', 15, date)).rejects.toBeInstanceOf(BadRequestException)
+		await expect(service.saveDailyProgress(TEST_ANONYMOUS_ID, { puzzleDate: date })).rejects.toBeInstanceOf(BadRequestException)
+	})
+
+	it('allows only one concurrent completion to commit a result', async () => {
+		const { prismaMock } = createPrismaMock([], {
+			attempts: [{ id: 1, anonymousId: TEST_ANONYMOUS_ID, puzzleDate: todayDate, status: DailyAttemptStatus.IN_PROGRESS }],
+		})
+		const service = await buildService(prismaMock)
+		const results = await Promise.allSettled([service.completeDaily(TEST_ANONYMOUS_ID, 'won', 15), service.completeDaily(TEST_ANONYMOUS_ID, 'lost', 0)])
+		expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+		const failure = results.find((result) => result.status === 'rejected')
+		expect(failure?.reason).toBeInstanceOf(ConflictException)
+	})
+
+	it('ignores a delayed progress write if completion won the database race', async () => {
+		const { prismaMock, attempts } = createPrismaMock([], {
+			attempts: [{ id: 1, anonymousId: TEST_ANONYMOUS_ID, puzzleDate: todayDate, status: DailyAttemptStatus.IN_PROGRESS }],
+		})
+		const service = await buildService(prismaMock)
+		const completion = service.completeDaily(TEST_ANONYMOUS_ID, 'won', 15)
+		const save = service.saveDailyProgress(TEST_ANONYMOUS_ID, { stale: true })
+		await completion
+		expect(await save).toEqual({ ok: true, ignored: true })
+		expect(attempts[0].progress).not.toEqual({ stale: true })
 	})
 
 	it('includes classic quota fields in getTodayPublicInfo', async () => {

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { DailyAttemptStatus, Prisma } from '@prisma/client'
+import { DailyAttemptStatus, DailyTriadAttempt, Prisma } from '@prisma/client'
 
 import { PrismaService } from '../prisma/prisma.service'
 import { extractCuesFromPhrases } from './cue-extraction'
@@ -64,7 +64,7 @@ export class TriadsDailyService {
 
 		const triadGroupId = group.id
 
-		const attempt = await this.prismaService.dailyTriadAttempt.findUnique({
+		let attempt = await this.prismaService.dailyTriadAttempt.findUnique({
 			where: {
 				anonymousId_puzzleDate: {
 					anonymousId,
@@ -73,63 +73,50 @@ export class TriadsDailyService {
 			},
 		})
 
-		if (attempt?.status === DailyAttemptStatus.WON || attempt?.status === DailyAttemptStatus.LOST) {
+		if (!attempt) {
+			const triads = [group.Triad1, group.Triad2, group.Triad3]
+			if (triads.some((triad) => !triad?.fullPhrases.length)) {
+				throw new BadRequestException('Today’s puzzle data is invalid.')
+			}
+			const cues = this.shuffleInitialCues(
+				...(triads.map((triad) => extractCuesFromPhrases(triad.fullPhrases, triad.keyword)) as [string[], string[], string[]]),
+			)
+			try {
+				attempt = await this.prismaService.dailyTriadAttempt.create({
+					data: { anonymousId, puzzleDate, triadGroupId, status: DailyAttemptStatus.IN_PROGRESS, scrambledCues: cues },
+				})
+			} catch (error) {
+				if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error
+				// A second tab or prefetched request may have created the same attempt.
+				attempt = await this.prismaService.dailyTriadAttempt.findUnique({ where: { anonymousId_puzzleDate: { anonymousId, puzzleDate } } })
+				if (!attempt) throw error
+			}
+		}
+
+		return this.dailyAttemptResponse(attempt, triadGroupId, puzzleDateStr, nextPuzzleAt)
+	}
+
+	private dailyAttemptResponse(attempt: DailyTriadAttempt, triadGroupId: number, puzzleDate: string, nextPuzzleAt: string) {
+		if (attempt.status === DailyAttemptStatus.WON || attempt.status === DailyAttemptStatus.LOST) {
 			return {
 				scheduled: true as const,
 				alreadyCompleted: true as const,
 				attemptStatus: attempt.status,
 				score: attempt.score,
 				triadGroupId,
-				puzzleDate: puzzleDateStr,
+				puzzleDate,
 				nextPuzzleAt,
 				cues: null,
 			}
 		}
-
-		if (attempt?.status === DailyAttemptStatus.IN_PROGRESS) {
-			return {
-				scheduled: true as const,
-				alreadyCompleted: false as const,
-				attemptStatus: DailyAttemptStatus.IN_PROGRESS,
-				triadGroupId,
-				cues: attempt.scrambledCues,
-				progress: attempt.progress ?? null,
-				puzzleDate: puzzleDateStr,
-				nextPuzzleAt,
-			}
-		}
-
-		const triad1 = group.Triad1
-		const triad2 = group.Triad2
-		const triad3 = group.Triad3
-		if (!triad1?.fullPhrases.length || !triad2?.fullPhrases.length || !triad3?.fullPhrases.length) {
-			throw new BadRequestException('Today’s puzzle data is invalid.')
-		}
-
-		const cues = this.shuffleInitialCues(
-			extractCuesFromPhrases(triad1.fullPhrases, triad1.keyword),
-			extractCuesFromPhrases(triad2.fullPhrases, triad2.keyword),
-			extractCuesFromPhrases(triad3.fullPhrases, triad3.keyword),
-		)
-
-		await this.prismaService.dailyTriadAttempt.create({
-			data: {
-				anonymousId,
-				puzzleDate,
-				triadGroupId,
-				status: DailyAttemptStatus.IN_PROGRESS,
-				scrambledCues: cues,
-			},
-		})
-
 		return {
 			scheduled: true as const,
 			alreadyCompleted: false as const,
 			attemptStatus: DailyAttemptStatus.IN_PROGRESS,
 			triadGroupId,
-			cues,
-			progress: null,
-			puzzleDate: puzzleDateStr,
+			cues: attempt.scrambledCues,
+			progress: attempt.progress ?? null,
+			puzzleDate,
 			nextPuzzleAt,
 		}
 	}
@@ -146,7 +133,7 @@ export class TriadsDailyService {
 			throw new BadRequestException('Progress payload is too large.')
 		}
 
-		const puzzleDateStr = getEasternYmd()
+		const puzzleDateStr = this.resolveAttemptDate((progress as { puzzleDate?: unknown }).puzzleDate)
 		const puzzleDate = easternYmdToDbDate(puzzleDateStr)
 
 		const attempt = await this.prismaService.dailyTriadAttempt.findUnique({
@@ -168,18 +155,18 @@ export class TriadsDailyService {
 			return { ok: true as const, ignored: true as const }
 		}
 
-		await this.prismaService.dailyTriadAttempt.update({
-			where: { id: attempt.id },
+		const saved = await this.prismaService.dailyTriadAttempt.updateMany({
+			where: { id: attempt.id, status: DailyAttemptStatus.IN_PROGRESS },
 			data: { progress: progress as Prisma.InputJsonValue },
 		})
 
-		return { ok: true as const, ignored: false as const }
+		return { ok: true as const, ignored: saved.count === 0 }
 	}
 
-	async completeDaily(anonymousId: string, outcome: 'won' | 'lost', score: number) {
+	async completeDaily(anonymousId: string, outcome: 'won' | 'lost', score: number, requestedPuzzleDate?: string) {
 		this.validateAnonymousId(anonymousId)
 
-		const puzzleDateStr = getEasternYmd()
+		const puzzleDateStr = this.resolveAttemptDate(requestedPuzzleDate)
 		const puzzleDate = easternYmdToDbDate(puzzleDateStr)
 
 		const attempt = await this.prismaService.dailyTriadAttempt.findUnique({
@@ -201,8 +188,8 @@ export class TriadsDailyService {
 
 		const nextStatus = outcome === 'won' ? DailyAttemptStatus.WON : DailyAttemptStatus.LOST
 
-		await this.prismaService.dailyTriadAttempt.update({
-			where: { id: attempt.id },
+		const completed = await this.prismaService.dailyTriadAttempt.updateMany({
+			where: { id: attempt.id, status: DailyAttemptStatus.IN_PROGRESS },
 			data: {
 				status: nextStatus,
 				score,
@@ -210,11 +197,25 @@ export class TriadsDailyService {
 			},
 		})
 
+		if (completed.count === 0) throw new ConflictException('This daily puzzle is already completed.')
+
 		return {
 			ok: true as const,
 			puzzleDate: puzzleDateStr,
 			nextPuzzleAt: getNextEasternMidnightIso(),
 		}
+	}
+
+	private resolveAttemptDate(requested: unknown): string {
+		if (requested === undefined) return getEasternYmd()
+		if (typeof requested !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(requested)) {
+			throw new BadRequestException('Invalid puzzle date.')
+		}
+		const date = new Date(`${requested}T00:00:00.000Z`)
+		if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== requested || requested > getEasternYmd()) {
+			throw new BadRequestException('Invalid puzzle date.')
+		}
+		return requested
 	}
 
 	async listSchedules(offset = 0, limit = 50) {

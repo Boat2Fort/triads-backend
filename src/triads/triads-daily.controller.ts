@@ -22,7 +22,7 @@ export class TriadsDailyController {
 
 	@Post('complete')
 	completeDaily(@Headers('x-anonymous-id') anonymousId: string | undefined, @Body() body: DailyCompleteDto) {
-		return this.triadsDailyService.completeDaily(anonymousId ?? '', body.outcome, body.score)
+		return this.triadsDailyService.completeDaily(anonymousId ?? '', body.outcome, body.score, body.puzzleDate)
 	}
 
 	@Put('progress')

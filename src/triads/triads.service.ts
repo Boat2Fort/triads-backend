@@ -1,11 +1,11 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { Difficulty, Prisma } from '@prisma/client'
-import { isEmpty, xor } from 'lodash'
 
 import { PrismaService } from '../prisma/prisma.service'
 import { buildFourthTriadReceipt, formatFourthTriadReceipt } from '../shared/validators/fourth-triad-receipt'
 import { extractCuesFromPhrases } from './cue-extraction'
 import { CreateTriadGroupDto } from './dto/create-triad-group.dto'
+import { GameContextDto } from './dto/game-context.dto'
 import { DifficultyFilter, GetCuesDto } from './dto/get-cues.dto'
 import { GetFourthTriadDto } from './dto/get-fourth-triad.dto'
 import { GetHintDto } from './dto/get-hint.dto'
@@ -125,60 +125,91 @@ export class TriadsService {
 		}
 	}
 
-	async getMatchedTriad(cues: string[]): Promise<{ id: number; keyword: string; cues: string[]; fullPhrases: string[] } | undefined> {
-		const sampleCue = cues[0]
-		const sampleCueVariants = [...new Set([sampleCue.toUpperCase(), this.normalizeCueForMatch(sampleCue)])]
-
-		// Limit results to prevent loading all triads into memory
-		const triadsContainingSampleCue = await this.prismaService.triad.findMany({
-			where: { cues: { hasSome: sampleCueVariants } },
-			take: 1000, // Reasonable limit to prevent memory issues
-		})
-
-		return triadsContainingSampleCue.find((triad) =>
-			isEmpty(
-				xor(
-					triad.cues.map((cue) => this.normalizeCueForMatch(cue)),
-					cues.map((cue) => this.normalizeCueForMatch(cue)),
-				),
-			),
+	async getMatchedTriad(cues: string[], context: GameContextDto = {}, answer?: string) {
+		if (cues.length !== 3) return undefined
+		const candidates = await this.getGameplayCandidates(cues, context, true)
+		return candidates.find(
+			(triad) => this.sameCueSet(triad.cues, cues) && (answer === undefined || triad.keyword.trim().toUpperCase() === answer.trim().toUpperCase()),
 		)
 	}
 
-	checkAnswer(answer: string, triad: { id: number; keyword: string; cues: string[]; fullPhrases: string[] }) {
-		return triad.keyword.trim().toUpperCase() === answer.trim().toUpperCase() ? triad : false
+	checkAnswer(answer: string, triad: { id: number; keyword: string; cues: string[]; fullPhrases: string[] } | undefined, submittedCues?: string[]) {
+		if (!triad || triad.keyword.trim().toUpperCase() !== answer.trim().toUpperCase()) {
+			return false
+		}
+
+		// Existing Daily sessions may still show the pre-hyphen spelling. Return
+		// the validated submitted text so animations and removal use that board's cues.
+		return { ...triad, cues: submittedCues ?? this.getDisplayedCues(triad.cues, triad.keyword, triad.fullPhrases) }
 	}
 
 	async getHint(getHintDto: GetHintDto) {
-		// Pick a sample cue to work with
-		const sampleCue = getHintDto.cues[Math.floor(Math.random() * getHintDto.cues.length)]
-		const normalizedCues = getHintDto.cues.map((cue) => this.normalizeCueForMatch(cue))
-		const sampleCueVariants = [...new Set([sampleCue.toUpperCase(), this.normalizeCueForMatch(sampleCue)])]
-
-		// Get list of triads containing the sample cue with limit to prevent memory issues
-		const triadsContainingSampleCue = await this.prismaService.triad.findMany({
-			where: { cues: { hasSome: sampleCueVariants } },
-			take: 1000, // Reasonable limit to prevent memory issues
-		})
-
-		// Find a triad which contains the sample cue word and two other cues from the list of cues received
-		const matchedTriad = triadsContainingSampleCue.find((triad) => triad.cues.every((cue) => normalizedCues.includes(this.normalizeCueForMatch(cue))))
-		const hint = matchedTriad
-			? matchedTriad.cues.map(
-					(cue) => getHintDto.cues.find((submittedCue) => this.normalizeCueForMatch(submittedCue) === this.normalizeCueForMatch(cue)) ?? cue,
-				)
-			: null
+		const candidates = await this.getGameplayCandidates(getHintDto.cues, getHintDto)
+		const matchedTriad = candidates.find((triad) => this.containsCueSet(getHintDto.cues, triad.cues))
+		const indices = matchedTriad ? this.matchCueIndices(getHintDto.cues, matchedTriad.cues) : null
+		const hint = indices?.map((index) => getHintDto.cues[index]) ?? null
+		const keyword = matchedTriad?.keyword.trim()
 
 		return {
 			hint,
 			with: getHintDto.with,
-			withValue:
-				getHintDto.with && matchedTriad
-					? getHintDto.with === 'KEYWORD_LENGTH'
-						? matchedTriad.keyword.length
-						: matchedTriad.keyword.charAt(0)
-					: undefined,
+			withValue: getHintDto.with && keyword ? (getHintDto.with === 'KEYWORD_LENGTH' ? keyword.length : keyword.charAt(0)) : undefined,
 		}
+	}
+
+	private async getGameplayCandidates(cues: string[], context: GameContextDto, exact = false) {
+		if (context.triadGroupId !== undefined) {
+			const group = await this.prismaService.triadGroup.findUnique({
+				where: { id: context.triadGroupId },
+				include: { Triad1: true, Triad2: true, Triad3: true, Triad4: true },
+			})
+			if (!group) return []
+			if (context.triadsStep === 'FINAL') {
+				const receipt = buildFourthTriadReceipt([group.Triad1.keyword, group.Triad2.keyword, group.Triad3.keyword], group.Triad4)
+				return [{ ...group.Triad4, cues: receipt.valid ? receipt.matches.map((match) => match.residual.trim().toUpperCase()) : group.Triad4.cues }]
+			}
+			return [group.Triad1, group.Triad2, group.Triad3].map((triad) => ({
+				...triad,
+				cues: this.getDisplayedCues(triad.cues, triad.keyword, triad.fullPhrases),
+			}))
+		}
+
+		// Older clients omit the group. Query all supplied cues, including both
+		// hyphen spellings, instead of relying on an arbitrary first/random cue.
+		const variants = (cue: string) => {
+			const normalized = this.normalizeCueForMatch(cue)
+			return [...new Set([cue.toUpperCase(), normalized, `-${normalized}`, `${normalized}-`, `_${normalized}`, `${normalized}_`])]
+		}
+		const triads = await this.prismaService.triad.findMany({
+			where: exact ? { AND: cues.map((cue) => ({ cues: { hasSome: variants(cue) } })) } : { cues: { hasSome: [...new Set(cues.flatMap(variants))] } },
+		})
+		return triads.map((triad) => ({ ...triad, cues: this.getDisplayedCues(triad.cues, triad.keyword, triad.fullPhrases) }))
+	}
+
+	private containsCueSet(available: string[], wanted: string[]): boolean {
+		return this.matchCueIndices(available, wanted) !== null
+	}
+
+	private matchCueIndices(available: string[], wanted: string[]): number[] | null {
+		if (wanted.length !== 3) return null
+		const search = (matched: number[]): number[] | null => {
+			if (matched.length === wanted.length) return matched
+			const cue = wanted[matched.length]
+			const candidates = available
+				.map((value, index) => ({ value, index }))
+				.filter(({ value, index }) => !matched.includes(index) && this.cuesMatch(value, cue))
+				.sort((a, b) => Number(b.value === cue) - Number(a.value === cue))
+			for (const { index } of candidates) {
+				const result = search([...matched, index])
+				if (result) return result
+			}
+			return null
+		}
+		return search([])
+	}
+
+	private sameCueSet(a: string[], b: string[]): boolean {
+		return a.length === b.length && this.containsCueSet(a, b)
 	}
 
 	async getFourthTriadCues(getFourthTriadDto: GetFourthTriadDto) {
@@ -807,6 +838,15 @@ export class TriadsService {
 
 	private getDisplayedCues(storedCues: string[], keyword?: string, fullPhrases?: string[]): string[] {
 		return keyword && fullPhrases?.length ? extractCuesFromPhrases(fullPhrases, keyword) : storedCues
+	}
+
+	private cuesMatch(a: string, b: string): boolean {
+		const left = a.trim().toUpperCase()
+		const right = b.trim().toUpperCase()
+		const normalized = this.normalizeCueForMatch(left)
+		// An older board may omit a joiner. Two explicit joiners still carry
+		// direction: PUSH- and -PUSH are different displayed cues.
+		return left === right || (normalized === this.normalizeCueForMatch(right) && (left === normalized || right === normalized))
 	}
 
 	private normalizeCueForMatch(cue: string): string {

@@ -32,16 +32,16 @@ export class TriadsController {
 
 	@Get('check-triad')
 	async checkSolution(@Query() checkSolutionDto: CheckSolutionDto) {
-		const matchedTriad = await this.triadsService.getMatchedTriad(checkSolutionDto.cues)
+		const matchedTriad = await this.triadsService.getMatchedTriad(checkSolutionDto.cues, checkSolutionDto)
 
 		return Boolean(matchedTriad)
 	}
 
 	@Get('check-answer')
 	async checkAnswer(@Query() checkAnswerDto: CheckAnswerDto) {
-		const matchedTriad = await this.triadsService.getMatchedTriad(checkAnswerDto.cues)
+		const matchedTriad = await this.triadsService.getMatchedTriad(checkAnswerDto.cues, checkAnswerDto, checkAnswerDto.answer)
 
-		return this.triadsService.checkAnswer(checkAnswerDto.answer, matchedTriad)
+		return this.triadsService.checkAnswer(checkAnswerDto.answer, matchedTriad, checkAnswerDto.cues)
 	}
 
 	@Get('fourth-triad-cues')
