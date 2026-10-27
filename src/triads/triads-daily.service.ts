@@ -23,6 +23,29 @@ export class TriadsDailyService {
 		return [...triad1, ...triad2, ...triad3].sort(() => Math.random() - 0.5)
 	}
 
+	async recordMagazineVisit(anonymousId: string | undefined) {
+		this.validateAnonymousId(anonymousId)
+		await this.prismaService.$executeRaw`INSERT INTO "magazine_visits" ("anonymousId") VALUES (${anonymousId}) ON CONFLICT ("anonymousId") DO NOTHING`
+		return { recorded: true }
+	}
+
+	async getMagazineReport() {
+		const [row] = await this.prismaService.$queryRaw<Array<{ visitors: bigint; players: bigint; completed: bigint; returned: bigint }>>`
+			WITH first_attempts AS (
+				SELECT DISTINCT ON ("anonymousId") "anonymousId", "puzzleDate", "createdAt", status
+				FROM daily_triad_attempts ORDER BY "anonymousId", "puzzleDate", "createdAt"
+			), ad_players AS (
+				SELECT f.* FROM first_attempts f JOIN magazine_visits v ON v."anonymousId" = f."anonymousId"
+				WHERE v."createdAt" <= f."createdAt"
+			)
+			SELECT (SELECT COUNT(*) FROM magazine_visits) AS visitors,
+				COUNT(*) AS players,
+				COUNT(*) FILTER (WHERE p.status IN ('WON', 'LOST')) AS completed,
+				COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM daily_triad_attempts later WHERE later."anonymousId" = p."anonymousId" AND later."puzzleDate" > p."puzzleDate")) AS returned
+			FROM ad_players p`
+		return { visitors: Number(row.visitors), players: Number(row.players), completed: Number(row.completed), returned: Number(row.returned) }
+	}
+
 	async getDailyCues(anonymousId: string) {
 		this.validateAnonymousId(anonymousId)
 

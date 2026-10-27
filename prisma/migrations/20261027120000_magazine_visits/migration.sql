@@ -1,0 +1,4 @@
+CREATE TABLE "magazine_visits" (
+  "anonymousId" TEXT PRIMARY KEY,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

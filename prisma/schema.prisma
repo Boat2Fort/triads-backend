@@ -94,3 +94,10 @@ model DailyClassicExtraUsage {
   @@unique([anonymousId, puzzleDate])
   @@map("daily_classic_extra_usage")
 }
+
+model MagazineVisit {
+  anonymousId String   @id
+  createdAt   DateTime @default(now())
+
+  @@map("magazine_visits")
+}

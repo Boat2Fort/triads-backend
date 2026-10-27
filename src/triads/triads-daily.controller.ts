@@ -10,6 +10,16 @@ import { TriadsDailyService } from './triads-daily.service'
 export class TriadsDailyController {
 	constructor(private readonly triadsDailyService: TriadsDailyService) {}
 
+	@Post('magazine/visit')
+	recordMagazineVisit(@Headers('x-anonymous-id') anonymousId: string | undefined) {
+		return this.triadsDailyService.recordMagazineVisit(anonymousId)
+	}
+
+	@Get('magazine/report')
+	getMagazineReport() {
+		return this.triadsDailyService.getMagazineReport()
+	}
+
 	@Get('today')
 	getTodayPublicInfo(@Headers('x-anonymous-id') anonymousId: string | undefined) {
 		return this.triadsDailyService.getTodayPublicInfo(anonymousId)
